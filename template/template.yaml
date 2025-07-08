@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Step Function con 3 Lambdas que procesan InstanceId desde EventBridge
+
+Parameters:
+  S3Bucket:
+    Type: String
+    Description: Name of the S3 Bucket with the deployment scripts
+
+  Tag:
+    Type: String
+    Description: EC2 instance's tag (Optional)
+    Default: "NONE"
+
+
+Resources:
+  MySSMParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /trend_micro/aws/automate/s3
+      Type: String
+      Value: !Ref S3Bucket
+
+  TagSSMParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /trend_micro/aws/automate/ec2/tag
+      Type: String
+      Value: !Ref Tag
+
+  ### Role para Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaExecutionRoleForStepFunctions
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaS3AccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: arn:aws:s3:::automation-scripts-ws
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: arn:aws:s3:::automation-scripts-ws/*
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ssm:DescribeInstanceInformation
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand 
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: 
+                   - arn:aws:ssm:*:*:parameter/trend_micro/aws/automate/s3
+                   - arn:aws:ssm:*:*:parameter/trend_micro/aws/automate/ec2/tag
+
+
+  ### Role para Step Functions
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: StepFunctionsExecutionRoleForEC2Workflow
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionLambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: "*"
+
+  ### Lambda 1 - Captura InstanceId (simulada, solo pasa input al siguiente)
+  LambdaCaptureInstanceId:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CaptureInstanceIdFunction
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          import boto3
+          def handler(event, context):
+              ssm = boto3.client('ssm')
+              ec2 = boto3.resource('ec2')
+              instance_id = event['detail']['instance-id']             
+              response = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
+              tag = response['Parameter']['Value']
+              if tag == 'NONE':
+                  print(f"Captured InstanceId: {instance_id}")
+                  return {'InstanceId': instance_id}              
+              if ":" in tag:
+                  clave, valor = tag.split(":", 1)
+                  print(f"Clave: {clave}, Valor: {valor}")                 
+                  ec2instance = ec2.Instance(instance_id)
+                  value_tag = None
+                  for t in ec2instance.tags or []:
+                      if t["Key"] == clave:
+                          value_tag = t["Value"]
+                          break
+                  
+                  if value_tag == valor:
+                      print(f"Matching tag found: {clave}={valor}")
+                      return {'InstanceId': instance_id}
+                  else:
+                      print(f"Tag does not match. Found {clave}={value_tag}")
+                      raise Exception("Tag mismatch: stopping state machine execution")
+                      return {}
+              else:
+                  print("Formato inválido en el parámetro SSM")
+                  raise Exception("Tag mismatch: stopping state machine execution")
+                  return {}
+      MemorySize: 300     
+      Timeout: 90 
+
+
+
+  ### Lambda 2 - Procesa InstanceId (imprime)
+  LambdaProcess1:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: PrintInstanceIdStep2
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+
+          import boto3
+          import os
+          import time
+          ssm = boto3.client('ssm')
+          def wait_for_ssm_ready(instance_id, max_wait_sec=90):
+              print(f"Esperando que la instancia {instance_id} esté registrada en SSM...")
+              waited = 0
+              while waited < max_wait_sec:
+                  resp = ssm.describe_instance_information(
+                      Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}]
+                  )
+                  if resp['InstanceInformationList']:
+                      print("La instancia ya está registrada como Managed Instance.")
+                      return True
+                  print(f"Aún no está lista en SSM. Esperando... {waited}s")
+                  time.sleep(5)
+                  waited += 5
+              print("Tiempo agotado. La instancia no se registró en SSM.")
+              return False
+
+          def handler(event, context):
+              instance_id = event['InstanceId']
+              if not wait_for_ssm_ready(instance_id):
+                  return {
+                      'statusCode': 400,
+                      'body': f"La instancia {instance_id} no se registró en SSM a tiempo."
+                  }
+
+              return event
+      MemorySize: 300     
+      Timeout: 90    
+
+  ### Lambda 3 - Segundo procesamiento (también imprime)
+  LambdaProcess2:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: PrintInstanceIdStep3
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          s3 = boto3.client('s3')
+          ec2 = boto3.resource("ec2")
+          ssm = boto3.client('ssm')
+          response = ssm.get_parameter(Name='/trend_micro/aws/automate/s3')
+          bucket_name = response['Parameter']['Value']
+          prefix = ''
+
+          def handler(event, context):
+              try:
+                  # 1. Obtener ID de la instancia desde el evento
+                  instance_id = event['InstanceId']
+                  print(f"ID de la instancia: {instance_id}")
+
+                  # 2. Obtener plataforma de la instancia
+                  instance = ec2.Instance(instance_id)
+                  platform = instance.platform if instance.platform == 'windows' else 'linux'
+                  print(f"Plataforma: {platform}")
+
+
+                  # 3. Obtener listado de scripts del bucket
+                  response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+                  if 'Contents' not in response:
+                      return {'statusCode': 404, 'body': 'No se encontraron archivos en S3.'}
+
+                  # 4. Buscar archivo por extensión
+                  script_ext = '.ps1' if platform == 'windows' else '.sh'
+                  script_obj = next(
+                      (obj for obj in response['Contents'] if obj['Key'].endswith(script_ext)),
+                      None
+                  )
+
+                  if not script_obj:
+                      return {'statusCode': 404, 'body': f'No se encontró script con extensión {script_ext}'}
+
+                  key = script_obj['Key']
+                  filename = key.split('/')[-1]
+                  tmp_path = f"/tmp/{filename}"
+
+                  print(f"Script detectado: {key}")
+                  s3.download_file(bucket_name, key, tmp_path)
+                  print(f"Archivo {key} guardado en {tmp_path}")
+
+                  # 5. Leer contenido del script
+                  with open(tmp_path, 'r') as f:
+                      script_content = f.read()
+
+                  # 6. Determinar documento SSM y comando base
+                  ssm_document = 'AWS-RunPowerShellScript' if platform == 'windows' else 'AWS-RunShellScript'
+
+                  # 7. Enviar script como comando inline al SSM
+                  response = ssm.send_command(
+                      InstanceIds=[instance_id],
+                      DocumentName=ssm_document,
+                      Parameters={'commands': [script_content]},
+                      TimeoutSeconds=600,
+                  )
+
+                  command_id = response['Command']['CommandId']
+                  print(f"Comando enviado a la instancia {instance_id}. Command ID: {command_id}")
+
+                  return {
+                      'statusCode': 200,
+                      'body': f'Script {filename} ejecutado exitosamente en instancia {instance_id}.'
+                  }
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error: {str(e)}'
+                  }
+      MemorySize: 300     
+      Timeout: 90  
+
+  ### Step Function (State Machine)
+  EC2InstanceStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: EC2InstanceCreatedWorkflow
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString:
+        !Sub |
+          {
+            "StartAt": "CaptureInstanceId",
+            "States": {
+              "CaptureInstanceId": {
+                "Type": "Task",
+                "Resource": "${LambdaCaptureInstanceId.Arn}",
+                "Next": "Wait50Seconds"
+              },
+              "Wait50Seconds": {
+                "Type": "Wait",
+                "Seconds": 70,
+                "Next": "StepTwo"
+              },
+              "StepTwo": {
+                "Type": "Task",
+                "Resource": "${LambdaProcess1.Arn}",
+                "Next": "StepThree"
+              },
+              "StepThree": {
+                "Type": "Task",
+                "Resource": "${LambdaProcess2.Arn}",
+                "End": true
+              }
+            }
+          }
+
+  ### EventBridge Rule para disparar Step Function
+
+
+  Roleb57f6de3:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Amazon_EventBridge_Rule_Target_aac4_Rule3e47bafb9
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      MaxSessionDuration: 3600
+      Tags: []
+  Policyb4dee7a1:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: Amazon_EventBridge_Invoke_Step_Functions_2558956872370d846
+      RoleName:
+        Ref: Roleb57f6de3
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: "*"
+
+  Ruleba134333:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - Roleb57f6de3
+      - Policyb4dee7a1
+    Properties:
+      Name: step-invoer
+      EventPattern: >-
+        {"source":["aws.ec2"],"detail-type":["EC2 Instance State-change
+        Notification"],"detail":{"state":["running"]}}
+      State: ENABLED
+      EventBusName: default
+      Targets:
+        - Id: Id5090c066-81bf-4e5c-bd78-9dacba4566b4
+          Arn: !Ref EC2InstanceStepFunction
+          RoleArn:
+            Fn::GetAtt:
+              - Roleb57f6de3
+              - Arn
+
+
+
+
+
+
+Outputs:
+  StepFunctionName:
+    Value: !Ref EC2InstanceStepFunction
+    Description: Nombre de la Step Function
