@@ -30,9 +30,9 @@ This project contains an AWS Lambda function designed to automatically install s
      Example: `{"Key": "AutoProtect", "Value": "true"}`  
      If you set this parameter to `NONE`, the Lambda will run **on all EC2 instances** in the region.
 
-## 💡 Example Use Cases
+## 💡 Example Use
 
-- Run only on instances tagged with `Environment=Production`.
+- Run only on instances tagged with `Environment:Production` (This is the dormat to put the parameter).
 - Automatically install the agent on all current and future instances by setting the tag parameter to `NONE`.
 
 ## 📦 Notes
@@ -41,6 +41,7 @@ This project contains an AWS Lambda function designed to automatically install s
   - Read from S3
   - Describe and interact with EC2 instances
   - Send logs to CloudWatch
+- Remember, for this automation to work properly, all instances must have the AmazonSSMManagedInstanceCore role attached.
 
 ## 📄 License
 
