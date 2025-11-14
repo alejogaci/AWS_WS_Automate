@@ -10,6 +10,11 @@ This project contains an AWS Lambda function designed to automatically install s
   - IAM roles and policies
 - A set of installation scripts for the server and workload protection agents (for both Windows and Linux).
 
+## ⚙️ Arquitectura
+
+<img width="764" height="418" alt="Diagrama sin título drawio" src="https://github.com/user-attachments/assets/0470dfa6-3e32-4560-8b9f-d0a65d9ce64e" />
+
+
 ## 🚀 Deployment Steps
 
 1. **Create an S3 Bucket**  
