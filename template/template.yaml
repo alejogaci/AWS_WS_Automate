@@ -122,27 +122,46 @@ Resources:
 
               print(f"Validating tags for instance {instance_id}: {tag_string}")
 
-              if tag_string == 'NONE':
-                  return {'InstanceId': instance_id}
-
-              try:
-                  required_tags = {}
-                  for pair in tag_string.split(";"):
-                      key, value = pair.split(":", 1)
-                      required_tags[key.strip()] = value.strip()
-              except ValueError:
-                  raise Exception("Invalid format in SSM parameter. Use key:value or key:value;key2:value2")
-
               ec2instance = ec2.Instance(instance_id)
               instance_tags = {t["Key"]: t["Value"] for t in (ec2instance.tags or [])}
 
-              for key, value in required_tags.items():
-                  if key not in instance_tags:
-                      raise Exception(f"Missing required tag: {key}")
-                  if instance_tags[key] != value:
-                      raise Exception(f"Tag mismatch for '{key}'. Expected '{value}', found '{instance_tags[key]}'")
+              if tag_string != 'NONE':
+                  try:
+                      required_tags = {}
+                      for pair in tag_string.split(";"):
+                          key, value = pair.split(":", 1)
+                          required_tags[key.strip()] = value.strip()
+                  except ValueError:
+                      raise Exception("Invalid format in SSM parameter. Use key:value or key:value;key2:value2")
 
-              print(f"All required tags validated for instance {instance_id}")
+                  for key, value in required_tags.items():
+                      if key not in instance_tags:
+                          raise Exception(f"Missing required tag: {key}")
+                      if instance_tags[key] != value:
+                          raise Exception(f"Tag mismatch for '{key}'. Expected '{value}', found '{instance_tags[key]}'")
+
+                  print(f"All required tags validated for instance {instance_id}")
+
+              is_ecs = 'aws:ecs:clusterName' in instance_tags
+              is_eks = any(k.startswith('kubernetes.io/cluster/') or k == 'eks:cluster-name' for k in instance_tags)
+
+              if not is_ecs and not is_eks:
+                  cluster_info = "None"
+                  print(f"Instance {instance_id} does not belong to ECS or EKS cluster - SKIPPED")
+                  raise Exception(f"Instance {instance_id} is not part of ECS/EKS cluster")
+
+              if is_ecs:
+                  cluster_info = f"ECS: {instance_tags['aws:ecs:clusterName']}"
+              elif is_eks:
+                  for key in instance_tags:
+                      if key.startswith('kubernetes.io/cluster/'):
+                          cluster_info = f"EKS: {key.replace('kubernetes.io/cluster/', '')}"
+                          break
+                      elif key == 'eks:cluster-name':
+                          cluster_info = f"EKS: {instance_tags[key]}"
+                          break
+
+              print(f"Instance {instance_id} validated - Cluster: {cluster_info}")
               return {'InstanceId': instance_id}
 
       MemorySize: 300     
@@ -630,7 +649,7 @@ Resources:
               "ProcessInstances": {
                 "Type": "Map",
                 "ItemsPath": "$.scanResult.instancesToProcess",
-                "MaxConcurrency": 20,
+                "MaxConcurrency": 5,
                 "Iterator": {
                   "StartAt": "CheckSSMRegistration",
                   "States": {
@@ -773,4 +792,3 @@ Outputs:
   InstallAgentLambdaArn:
     Value: !GetAtt TrendmicroAgentServiceInstallAgentLambda.Arn
     Description: Lambda that installs Trend Micro agent (shared)
-
