@@ -30,7 +30,7 @@
 - ✅ Scans **all** existing EC2 instances in the account
 - ✅ Filters by customizable tags
 - ✅ Automatically identifies **ECS** and **EKS** clusters
-- ✅ Installs agent in **parallel** (max 5 concurrent)
+- ✅ Installs agent in **parallel** (max  concurrent)
 - ✅ Automatic execution when deploying CloudFormation
 
 #### 2️⃣ **Triggered Mode** - New instances
@@ -45,7 +45,7 @@
 |---------|-------------|
 | **Intelligent Detection** | Automatically identifies ECS (`aws:ecs:clusterName`) and EKS (`kubernetes.io/cluster/*`) instances |
 | **Tag Filtering** | Support for multiple tags: `key1:value1;key2:value2` or `NONE` for no filter |
-| **Concurrency Control** | Maximum 5 instances processed in parallel |
+| **Concurrency Control** | Maximum 20 instances processed in parallel |
 | **Automatic Retries** | Configurable retries with exponential backoff |
 | **Detailed Logs** | CloudWatch Logs with complete information for each step |
 | **Multi-Platform** | Support for Linux (`.sh`) and Windows (`.ps1`) |
