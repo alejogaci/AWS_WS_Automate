@@ -1,37 +1,34 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Step Function con 3 Lambdas que procesan InstanceId desde EventBridge
+Description: Trend Micro Agent Service - Automated deployment for ECS/EKS instances via Step Functions and EventBridge
 
 Parameters:
   S3Bucket:
     Type: String
-    Description: Name of the S3 Bucket with the deployment scripts
+    Description: Name of the S3 Bucket containing the installation scripts
 
   Tag:
     Type: String
-    Description: EC2 instance's tag (Optional)
-    Default: "NONE"
-
+    Description: EC2 instance tag filter (use 'NONE' for no filtering, or 'key:value' format)
 
 Resources:
-  MySSMParameter:
+  SSMParameterS3Bucket:
     Type: AWS::SSM::Parameter
     Properties:
       Name: /trend_micro/aws/automate/s3
       Type: String
       Value: !Ref S3Bucket
 
-  TagSSMParameter:
+  SSMParameterEC2Tag:
     Type: AWS::SSM::Parameter
     Properties:
       Name: /trend_micro/aws/automate/ec2/tag
       Type: String
       Value: !Ref Tag
 
-  ### Role para Lambda
-  LambdaExecutionRole:
+  TrendmicroAgentServiceLambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: LambdaExecutionRoleForStepFunctions
+      RoleName: TRENDMICRO-AGENT-SERVICE-LAMBDA-ROLE
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -49,11 +46,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: arn:aws:s3:::automation-scripts-ws
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}"
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: arn:aws:s3:::automation-scripts-ws/*
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
               - Effect: Allow
                 Action:
                   - ec2:DescribeInstances
@@ -67,15 +64,21 @@ Resources:
                 Action:
                   - ssm:GetParameter
                 Resource: 
-                   - arn:aws:ssm:*:*:parameter/trend_micro/aws/automate/s3
-                   - arn:aws:ssm:*:*:parameter/trend_micro/aws/automate/ec2/tag
+                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trend_micro/aws/automate/s3"
+                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trend_micro/aws/automate/ec2/tag"
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:TRENDMICRO-AGENT-SERVICE-INITIAL-SCAN-INSTANCES"
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:TRENDMICRO-AGENT-SERVICE-INITIAL-SCAN-WORKFLOW"
 
-
-  ### Role para Step Functions
-  StepFunctionsExecutionRole:
+  TrendmicroAgentServiceStepFunctionsRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: StepFunctionsExecutionRoleForEC2Workflow
+      RoleName: TRENDMICRO-AGENT-SERVICE-STEP-FUNCTIONS-ROLE
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -97,189 +100,472 @@ Resources:
                   - states:StartExecution
                 Resource: "*"
 
-  ### Lambda 1 - Captura InstanceId (simulada, solo pasa input al siguiente)
-  LambdaCaptureInstanceId:
+  TriggeredCaptureInstanceLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: CaptureInstanceIdFunction
+      FunctionName: TRENDMICRO-AGENT-SERVICE-TRIGGERED-CAPTURE-INSTANCE
       Handler: index.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt TrendmicroAgentServiceLambdaRole.Arn
       Runtime: python3.9
       Code:
         ZipFile: |
           import boto3
-          import boto3
+
           def handler(event, context):
               ssm = boto3.client('ssm')
               ec2 = boto3.resource('ec2')
-              instance_id = event['detail']['instance-id']             
+
+              instance_id = event['detail']['instance-id']
+
               response = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
-              tag = response['Parameter']['Value']
-              if tag == 'NONE':
-                  print(f"Captured InstanceId: {instance_id}")
-                  return {'InstanceId': instance_id}              
-              if ":" in tag:
-                  clave, valor = tag.split(":", 1)
-                  print(f"Clave: {clave}, Valor: {valor}")                 
-                  ec2instance = ec2.Instance(instance_id)
-                  value_tag = None
-                  for t in ec2instance.tags or []:
-                      if t["Key"] == clave:
-                          value_tag = t["Value"]
-                          break
-                  
-                  if value_tag == valor:
-                      print(f"Matching tag found: {clave}={valor}")
-                      return {'InstanceId': instance_id}
-                  else:
-                      print(f"Tag does not match. Found {clave}={value_tag}")
-                      raise Exception("Tag mismatch: stopping state machine execution")
-                      return {}
-              else:
-                  print("Formato inválido en el parámetro SSM")
-                  raise Exception("Tag mismatch: stopping state machine execution")
-                  return {}
+              tag_string = response['Parameter']['Value']
+
+              print(f"Validating tags for instance {instance_id}: {tag_string}")
+
+              if tag_string == 'NONE':
+                  return {'InstanceId': instance_id}
+
+              try:
+                  required_tags = {}
+                  for pair in tag_string.split(";"):
+                      key, value = pair.split(":", 1)
+                      required_tags[key.strip()] = value.strip()
+              except ValueError:
+                  raise Exception("Invalid format in SSM parameter. Use key:value or key:value;key2:value2")
+
+              ec2instance = ec2.Instance(instance_id)
+              instance_tags = {t["Key"]: t["Value"] for t in (ec2instance.tags or [])}
+
+              for key, value in required_tags.items():
+                  if key not in instance_tags:
+                      raise Exception(f"Missing required tag: {key}")
+                  if instance_tags[key] != value:
+                      raise Exception(f"Tag mismatch for '{key}'. Expected '{value}', found '{instance_tags[key]}'")
+
+              print(f"All required tags validated for instance {instance_id}")
+              return {'InstanceId': instance_id}
+
       MemorySize: 300     
       Timeout: 90 
 
-
-
-  ### Lambda 2 - Procesa InstanceId (imprime)
-  LambdaProcess1:
+  TriggeredWaitSSMLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: PrintInstanceIdStep2
+      FunctionName: TRENDMICRO-AGENT-SERVICE-TRIGGERED-WAIT-SSM
       Handler: index.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt TrendmicroAgentServiceLambdaRole.Arn
       Runtime: python3.9
       Code:
         ZipFile: |
-
           import boto3
-          import os
           import time
+          import json
+          
           ssm = boto3.client('ssm')
+          
           def wait_for_ssm_ready(instance_id, max_wait_sec=90):
-              print(f"Esperando que la instancia {instance_id} esté registrada en SSM...")
+              print(f"[START] Waiting for SSM registration for instance: {instance_id}")
+              print(f"[CONFIG] Maximum wait time: {max_wait_sec} seconds")
+              
               waited = 0
+              attempt = 1
+              
               while waited < max_wait_sec:
+                  print(f"[ATTEMPT {attempt}] Checking SSM registration (waited: {waited}s)...")
+                  
                   resp = ssm.describe_instance_information(
                       Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}]
                   )
+                  
                   if resp['InstanceInformationList']:
-                      print("La instancia ya está registrada como Managed Instance.")
+                      instance_info = resp['InstanceInformationList'][0]
+                      print(f"[SUCCESS] Instance registered in SSM after {waited} seconds")
+                      print(f"[INFO] Platform: {instance_info.get('PlatformType', 'Unknown')}")
+                      print(f"[INFO] Platform Version: {instance_info.get('PlatformVersion', 'Unknown')}")
+                      print(f"[INFO] Agent Version: {instance_info.get('AgentVersion', 'Unknown')}")
+                      print(f"[INFO] Ping Status: {instance_info.get('PingStatus', 'Unknown')}")
                       return True
-                  print(f"Aún no está lista en SSM. Esperando... {waited}s")
+                  
+                  print(f"[WAITING] Instance not yet registered, waiting 5 more seconds...")
                   time.sleep(5)
                   waited += 5
-              print("Tiempo agotado. La instancia no se registró en SSM.")
+                  attempt += 1
+              
+              print(f"[ERROR] Timeout: Instance not registered in SSM after {max_wait_sec} seconds")
               return False
-
+          
           def handler(event, context):
-              instance_id = event['InstanceId']
-              if not wait_for_ssm_ready(instance_id):
+              print(f"[EVENT] {json.dumps(event)}")
+              
+              instance_id = event.get('InstanceId')
+              
+              if not instance_id:
+                  print("[ERROR] InstanceId not provided in event")
                   return {
                       'statusCode': 400,
-                      'body': f"La instancia {instance_id} no se registró en SSM a tiempo."
+                      'body': 'InstanceId not provided',
+                      'InstanceId': None
                   }
-
+              
+              print(f"[PROCESSING] Instance: {instance_id}")
+              
+              if not wait_for_ssm_ready(instance_id):
+                  print(f"[FINAL FAILURE] Instance {instance_id} not registered in SSM")
+                  return {
+                      'statusCode': 400,
+                      'body': "Not registered in SSM",
+                      'InstanceId': instance_id
+                  }
+              
+              print(f"[COMPLETED] Instance {instance_id} ready for next step")
               return event
       MemorySize: 300     
-      Timeout: 90    
+      Timeout: 120
 
-  ### Lambda 3 - Segundo procesamiento (también imprime)
-  LambdaProcess2:
+  InitialCheckSSMLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: PrintInstanceIdStep3
+      FunctionName: TRENDMICRO-AGENT-SERVICE-INITIAL-CHECK-SSM
       Handler: index.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt TrendmicroAgentServiceLambdaRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          
+          ssm = boto3.client('ssm')
+          
+          def handler(event, context):
+              print(f"[EVENT] {json.dumps(event)}")
+              
+              instance_id = event.get('InstanceId')
+              cluster_type = event.get('ClusterType', 'Unknown')
+              cluster_name = event.get('ClusterName', 'Unknown')
+              
+              if not instance_id:
+                  print("[ERROR] InstanceId not provided in event")
+                  raise Exception('InstanceId not provided')
+              
+              print(f"[START] Checking SSM registration for instance: {instance_id}")
+              print(f"[INFO] Cluster Type: {cluster_type}")
+              print(f"[INFO] Cluster Name: {cluster_name}")
+              
+              try:
+                  resp = ssm.describe_instance_information(
+                      Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}]
+                  )
+                  
+                  if not resp['InstanceInformationList']:
+                      print(f"[ERROR] Instance {instance_id} NOT registered in SSM")
+                      print(f"[RECOMMENDATION] Verify that SSM agent is installed and running")
+                      raise Exception(f'Instance {instance_id} not registered in SSM')
+                  
+                  instance_info = resp['InstanceInformationList'][0]
+                  
+                  print(f"[SUCCESS] Instance {instance_id} is registered in SSM")
+                  print(f"[SSM INFO] Platform Type: {instance_info.get('PlatformType', 'Unknown')}")
+                  print(f"[SSM INFO] Platform Name: {instance_info.get('PlatformName', 'Unknown')}")
+                  print(f"[SSM INFO] Platform Version: {instance_info.get('PlatformVersion', 'Unknown')}")
+                  print(f"[SSM INFO] Agent Version: {instance_info.get('AgentVersion', 'Unknown')}")
+                  print(f"[SSM INFO] Ping Status: {instance_info.get('PingStatus', 'Unknown')}")
+                  print(f"[SSM INFO] Last Ping: {instance_info.get('LastPingDateTime', 'Unknown')}")
+                  
+                  if instance_info.get('PingStatus') != 'Online':
+                      print(f"[WARNING] Instance is not Online, status: {instance_info.get('PingStatus')}")
+                  
+                  print(f"[COMPLETED] Instance {instance_id} ready for agent installation")
+                  
+                  return event
+                  
+              except Exception as e:
+                  print(f"[EXCEPTION] Error checking SSM: {str(e)}")
+                  raise
+      MemorySize: 256
+      Timeout: 30
+
+  TrendmicroAgentServiceInstallAgentLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: TRENDMICRO-AGENT-SERVICE-INSTALL-AGENT
+      Handler: index.handler
+      Role: !GetAtt TrendmicroAgentServiceLambdaRole.Arn
       Runtime: python3.9
       Code:
         ZipFile: |
           import boto3
           import os
-          import time
+          import json
+          
           s3 = boto3.client('s3')
           ec2 = boto3.resource("ec2")
           ssm = boto3.client('ssm')
-          response = ssm.get_parameter(Name='/trend_micro/aws/automate/s3')
-          bucket_name = response['Parameter']['Value']
-          prefix = ''
-
+          
           def handler(event, context):
+              print(f"[EVENT] {json.dumps(event)}")
+              
               try:
-                  # 1. Obtener ID de la instancia desde el evento
-                  instance_id = event['InstanceId']
-                  print(f"ID de la instancia: {instance_id}")
-
-                  # 2. Obtener plataforma de la instancia
+                  instance_id = event.get('InstanceId')
+                  
+                  if not instance_id:
+                      print("[ERROR] InstanceId not provided")
+                      return {'statusCode': 400, 'body': 'InstanceId not provided'}
+                  
+                  print(f"[START] Processing installation for instance: {instance_id}")
+                  
+                  print("[S3] Getting bucket name from SSM...")
+                  response_param = ssm.get_parameter(Name='/trend_micro/aws/automate/s3')
+                  bucket_name = response_param['Parameter']['Value']
+                  print(f"[S3] Configured bucket: {bucket_name}")
+                  
+                  print(f"[EC2] Getting instance information...")
                   instance = ec2.Instance(instance_id)
                   platform = instance.platform if instance.platform == 'windows' else 'linux'
-                  print(f"Plataforma: {platform}")
-
-
-                  # 3. Obtener listado de scripts del bucket
-                  response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-                  if 'Contents' not in response:
-                      return {'statusCode': 404, 'body': 'No se encontraron archivos en S3.'}
-
-                  # 4. Buscar archivo por extensión
+                  print(f"[EC2] Detected platform: {platform}")
+                  print(f"[EC2] State: {instance.state['Name']}")
+                  print(f"[EC2] Type: {instance.instance_type}")
+                  
+                  print(f"[S3] Listing available scripts in bucket...")
+                  response_s3 = s3.list_objects_v2(Bucket=bucket_name)
+                  
+                  if 'Contents' not in response_s3:
+                      print(f"[ERROR] No files found in bucket {bucket_name}")
+                      return {'statusCode': 404, 'body': 'No files in S3'}
+                  
+                  print(f"[S3] Files found: {len(response_s3['Contents'])}")
+                  for obj in response_s3['Contents']:
+                      print(f"[S3]   - {obj['Key']}")
+                  
                   script_ext = '.ps1' if platform == 'windows' else '.sh'
-                  script_obj = next(
-                      (obj for obj in response['Contents'] if obj['Key'].endswith(script_ext)),
-                      None
-                  )
-
+                  print(f"[S3] Looking for script with extension: {script_ext}")
+                  
+                  script_obj = next((obj for obj in response_s3['Contents'] if obj['Key'].endswith(script_ext)), None)
+                  
                   if not script_obj:
-                      return {'statusCode': 404, 'body': f'No se encontró script con extensión {script_ext}'}
-
+                      print(f"[ERROR] Script {script_ext} not found in bucket")
+                      return {'statusCode': 404, 'body': f'Script {script_ext} not found'}
+                  
                   key = script_obj['Key']
                   filename = key.split('/')[-1]
+                  print(f"[S3] Selected script: {filename}")
+                  
                   tmp_path = f"/tmp/{filename}"
-
-                  print(f"Script detectado: {key}")
+                  print(f"[S3] Downloading script to {tmp_path}...")
                   s3.download_file(bucket_name, key, tmp_path)
-                  print(f"Archivo {key} guardado en {tmp_path}")
-
-                  # 5. Leer contenido del script
+                  
                   with open(tmp_path, 'r') as f:
                       script_content = f.read()
-
-                  # 6. Determinar documento SSM y comando base
+                  
+                  script_lines = len(script_content.splitlines())
+                  print(f"[SCRIPT] Size: {len(script_content)} bytes, {script_lines} lines")
+                  
                   ssm_document = 'AWS-RunPowerShellScript' if platform == 'windows' else 'AWS-RunShellScript'
-
-                  # 7. Enviar script como comando inline al SSM
+                  print(f"[SSM] Document: {ssm_document}")
+                  print(f"[SSM] Sending command to instance {instance_id}...")
+                  
                   response = ssm.send_command(
                       InstanceIds=[instance_id],
                       DocumentName=ssm_document,
                       Parameters={'commands': [script_content]},
-                      TimeoutSeconds=600,
+                      TimeoutSeconds=600
                   )
-
+                  
                   command_id = response['Command']['CommandId']
-                  print(f"Comando enviado a la instancia {instance_id}. Command ID: {command_id}")
-
+                  print(f"[SSM] Command sent successfully")
+                  print(f"[SSM] Command ID: {command_id}")
+                  print(f"[SSM] Status: {response['Command']['Status']}")
+                  
+                  print(f"[COMPLETED] Installation initiated for instance {instance_id}")
+                  
                   return {
                       'statusCode': 200,
-                      'body': f'Script {filename} ejecutado exitosamente en instancia {instance_id}.'
+                      'body': f'Script {filename} sent to instance {instance_id}',
+                      'commandId': command_id,
+                      'InstanceId': instance_id
                   }
-
+                  
               except Exception as e:
-                  print(f"Error: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'body': f'Error: {str(e)}'
-                  }
+                  print(f"[EXCEPTION] Error during installation: {str(e)}")
+                  print(f"[EXCEPTION] Type: {type(e).__name__}")
+                  import traceback
+                  print(f"[TRACEBACK] {traceback.format_exc()}")
+                  return {'statusCode': 500, 'body': str(e)}
       MemorySize: 300     
-      Timeout: 90  
+      Timeout: 90
 
-  ### Step Function (State Machine)
-  EC2InstanceStepFunction:
+  InitialScanInstancesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: TRENDMICRO-AGENT-SERVICE-INITIAL-SCAN-INSTANCES
+      Handler: index.handler
+      Role: !GetAtt TrendmicroAgentServiceLambdaRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          
+          ec2 = boto3.client('ec2')
+          ssm = boto3.client('ssm')
+          
+          def handler(event, context):
+              print("=== Starting EC2 instance scan ===")
+              
+              response = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
+              tag_filter = response['Parameter']['Value']
+              print(f"Tag filter parameter: {tag_filter}")
+              
+              required_tags = {}
+              if tag_filter != 'NONE':
+                  try:
+                      for pair in tag_filter.split(";"):
+                          key, value = pair.split(":", 1)
+                          required_tags[key.strip()] = value.strip()
+                      print(f"Required tags: {json.dumps(required_tags)}")
+                  except ValueError:
+                      print("ERROR: Invalid format in tag parameter")
+                      return {
+                          'statusCode': 400,
+                          'body': 'Invalid format in SSM parameter. Use key:value or key:value;key2:value2'
+                      }
+              else:
+                  print("No tag filtering (NONE)")
+              
+              print("Querying EC2 instances in 'running' state...")
+              response = ec2.describe_instances(
+                  Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+              )
+              
+              ecs_instances = []
+              eks_instances = []
+              total_scanned = 0
+              
+              for reservation in response['Reservations']:
+                  for instance in reservation['Instances']:
+                      total_scanned += 1
+                      instance_id = instance['InstanceId']
+                      tags = {t['Key']: t['Value'] for t in instance.get('Tags', [])}
+                      
+                      if required_tags:
+                          tag_match = all(tags.get(k) == v for k, v in required_tags.items())
+                          if not tag_match:
+                              print(f"Instance {instance_id} does not meet required tags - SKIPPED")
+                              continue
+                      
+                      if 'aws:ecs:clusterName' in tags:
+                          cluster_name = tags['aws:ecs:clusterName']
+                          ecs_instances.append({
+                              'InstanceId': instance_id,
+                              'ClusterName': cluster_name,
+                              'ClusterType': 'ECS'
+                          })
+                          print(f"✓ ECS - Instance: {instance_id}, Cluster: {cluster_name}")
+                          continue
+                      
+                      eks_cluster = None
+                      for key in tags:
+                          if key.startswith('kubernetes.io/cluster/'):
+                              eks_cluster = key.replace('kubernetes.io/cluster/', '')
+                              break
+                          elif key == 'eks:cluster-name':
+                              eks_cluster = tags[key]
+                              break
+                      
+                      if eks_cluster:
+                          eks_instances.append({
+                              'InstanceId': instance_id,
+                              'ClusterName': eks_cluster,
+                              'ClusterType': 'EKS'
+                          })
+                          print(f"✓ EKS - Instance: {instance_id}, Cluster: {eks_cluster}")
+              
+              print(f"\n=== SCAN SUMMARY ===")
+              print(f"Total instances scanned: {total_scanned}")
+              print(f"ECS instances found: {len(ecs_instances)}")
+              print(f"EKS instances found: {len(eks_instances)}")
+              print(f"\nECS Instances: {json.dumps(ecs_instances, indent=2)}")
+              print(f"\nEKS Instances: {json.dumps(eks_instances, indent=2)}")
+              
+              all_instances = ecs_instances + eks_instances
+              
+              return {
+                  'statusCode': 200,
+                  'totalScanned': total_scanned,
+                  'ecsInstances': ecs_instances,
+                  'eksInstances': eks_instances,
+                  'ecsCount': len(ecs_instances),
+                  'eksCount': len(eks_instances),
+                  'instancesToProcess': all_instances
+              }
+      MemorySize: 512     
+      Timeout: 300
+
+  InitialTriggerScanLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: TRENDMICRO-AGENT-SERVICE-INITIAL-TRIGGER-SCAN
+      Handler: index.handler
+      Role: !GetAtt TrendmicroAgentServiceLambdaRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib3
+          
+          sfn_client = boto3.client('stepfunctions')
+          
+          def handler(event, context):
+              http = urllib3.PoolManager()
+              response_data = {}
+              
+              try:
+                  request_type = event['RequestType']
+                  print(f"CloudFormation RequestType: {request_type}")
+                  
+                  if request_type == 'Create':
+                      print("Starting Initial Scan Step Function...")
+                      step_function_arn = event['ResourceProperties']['StepFunctionArn']
+                      
+                      response = sfn_client.start_execution(
+                          stateMachineArn=step_function_arn,
+                          input=json.dumps({})
+                      )
+                      
+                      execution_arn = response['executionArn']
+                      print(f"Step Function started: {execution_arn}")
+                      
+                      response_data['ExecutionArn'] = execution_arn
+                      response_data['Message'] = 'Initial scan started successfully'
+                      send_response(event, context, 'SUCCESS', response_data, http)
+                      
+                  elif request_type in ['Update', 'Delete']:
+                      print(f"No action required for {request_type}")
+                      send_response(event, context, 'SUCCESS', response_data, http)
+                      
+              except Exception as e:
+                  print(f"ERROR: {str(e)}")
+                  send_response(event, context, 'FAILED', {'Error': str(e)}, http)
+          
+          def send_response(event, context, status, data, http):
+              response_body = json.dumps({
+                  'Status': status,
+                  'Reason': f'See logs in CloudWatch: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data
+              })
+              
+              http.request('PUT', event['ResponseURL'], body=response_body)
+      Timeout: 120
+
+  TriggeredInstanceWorkflowStateMachine:
     Type: AWS::StepFunctions::StateMachine
     Properties:
-      StateMachineName: EC2InstanceCreatedWorkflow
-      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      StateMachineName: TRENDMICRO-AGENT-SERVICE-TRIGGERED-INSTANCE-WORKFLOW
+      RoleArn: !GetAtt TrendmicroAgentServiceStepFunctionsRole.Arn
       DefinitionString:
         !Sub |
           {
@@ -287,7 +573,7 @@ Resources:
             "States": {
               "CaptureInstanceId": {
                 "Type": "Task",
-                "Resource": "${LambdaCaptureInstanceId.Arn}",
+                "Resource": "${TriggeredCaptureInstanceLambda.Arn}",
                 "Next": "Wait50Seconds"
               },
               "Wait50Seconds": {
@@ -297,24 +583,124 @@ Resources:
               },
               "StepTwo": {
                 "Type": "Task",
-                "Resource": "${LambdaProcess1.Arn}",
+                "Resource": "${TriggeredWaitSSMLambda.Arn}",
                 "Next": "StepThree"
               },
               "StepThree": {
                 "Type": "Task",
-                "Resource": "${LambdaProcess2.Arn}",
+                "Resource": "${TrendmicroAgentServiceInstallAgentLambda.Arn}",
                 "End": true
               }
             }
           }
 
-  ### EventBridge Rule para disparar Step Function
+  InitialScanWorkflowStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: TRENDMICRO-AGENT-SERVICE-INITIAL-SCAN-WORKFLOW
+      RoleArn: !GetAtt TrendmicroAgentServiceStepFunctionsRole.Arn
+      DefinitionString:
+        !Sub |
+          {
+            "Comment": "Initial scan of ECS/EKS instances with agent installation",
+            "StartAt": "ScanInstances",
+            "States": {
+              "ScanInstances": {
+                "Type": "Task",
+                "Resource": "${InitialScanInstancesLambda.Arn}",
+                "ResultPath": "$.scanResult",
+                "Next": "CheckIfInstancesFound"
+              },
+              "CheckIfInstancesFound": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.scanResult.ecsCount",
+                    "NumericGreaterThan": 0,
+                    "Next": "ProcessInstances"
+                  },
+                  {
+                    "Variable": "$.scanResult.eksCount",
+                    "NumericGreaterThan": 0,
+                    "Next": "ProcessInstances"
+                  }
+                ],
+                "Default": "NoInstancesFound"
+              },
+              "ProcessInstances": {
+                "Type": "Map",
+                "ItemsPath": "$.scanResult.instancesToProcess",
+                "MaxConcurrency": 20,
+                "Iterator": {
+                  "StartAt": "CheckSSMRegistration",
+                  "States": {
+                    "CheckSSMRegistration": {
+                      "Type": "Task",
+                      "Resource": "${InitialCheckSSMLambda.Arn}",
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "IntervalSeconds": 10,
+                          "MaxAttempts": 2,
+                          "BackoffRate": 2
+                        }
+                      ],
+                      "Catch": [
+                        {
+                          "ErrorEquals": ["States.ALL"],
+                          "ResultPath": "$.error",
+                          "Next": "SSMRegistrationFailed"
+                        }
+                      ],
+                      "Next": "InstallAgent"
+                    },
+                    "InstallAgent": {
+                      "Type": "Task",
+                      "Resource": "${TrendmicroAgentServiceInstallAgentLambda.Arn}",
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "IntervalSeconds": 5,
+                          "MaxAttempts": 2,
+                          "BackoffRate": 1.5
+                        }
+                      ],
+                      "Catch": [
+                        {
+                          "ErrorEquals": ["States.ALL"],
+                          "ResultPath": "$.error",
+                          "Next": "InstallationFailed"
+                        }
+                      ],
+                      "End": true
+                    },
+                    "SSMRegistrationFailed": {
+                      "Type": "Pass",
+                      "Result": "Instance not registered in SSM",
+                      "End": true
+                    },
+                    "InstallationFailed": {
+                      "Type": "Pass",
+                      "Result": "Agent installation failed",
+                      "End": true
+                    }
+                  }
+                },
+                "ResultPath": "$.processingResults",
+                "End": true
+              },
+              "NoInstancesFound": {
+                "Type": "Pass",
+                "Result": "No ECS/EKS instances found to process",
+                "End": true
+              }
+            }
+          }
 
-
-  Roleb57f6de3:
+  TriggeredEventBridgeRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: Amazon_EventBridge_Rule_Target_aac4_Rule3e47bafb9
+      RoleName: TRENDMICRO-AGENT-SERVICE-TRIGGERED-EVENTBRIDGE-ROLE
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -323,47 +709,68 @@ Resources:
               Service: events.amazonaws.com
             Action: sts:AssumeRole
       MaxSessionDuration: 3600
-      Tags: []
-  Policyb4dee7a1:
+
+  TriggeredEventBridgePolicy:
     Type: AWS::IAM::RolePolicy
     Properties:
-      PolicyName: Amazon_EventBridge_Invoke_Step_Functions_2558956872370d846
-      RoleName:
-        Ref: Roleb57f6de3
+      PolicyName: TRENDMICRO-AGENT-SERVICE-TRIGGERED-EVENTBRIDGE-POLICY
+      RoleName: !Ref TriggeredEventBridgeRole
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action:
               - states:StartExecution
-            Resource: "*"
+            Resource: !Ref TriggeredInstanceWorkflowStateMachine
 
-  Ruleba134333:
+  TriggeredEventBridgeRule:
     Type: AWS::Events::Rule
     DependsOn:
-      - Roleb57f6de3
-      - Policyb4dee7a1
+      - TriggeredEventBridgeRole
+      - TriggeredEventBridgePolicy
     Properties:
-      Name: step-invoer
-      EventPattern: >-
-        {"source":["aws.ec2"],"detail-type":["EC2 Instance State-change
-        Notification"],"detail":{"state":["running"]}}
+      Name: TRENDMICRO-AGENT-SERVICE-TRIGGERED-EC2-RUNNING-RULE
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - running
       State: ENABLED
       EventBusName: default
       Targets:
-        - Id: Id5090c066-81bf-4e5c-bd78-9dacba4566b4
-          Arn: !Ref EC2InstanceStepFunction
-          RoleArn:
-            Fn::GetAtt:
-              - Roleb57f6de3
-              - Arn
+        - Id: TriggeredStepFunctionTarget
+          Arn: !Ref TriggeredInstanceWorkflowStateMachine
+          RoleArn: !GetAtt TriggeredEventBridgeRole.Arn
 
-
-
-
-
+  InitialScanCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - InitialScanInstancesLambda
+      - InitialTriggerScanLambda
+      - InitialScanWorkflowStateMachine
+      - InitialCheckSSMLambda
+      - TrendmicroAgentServiceInstallAgentLambda
+    Properties:
+      ServiceToken: !GetAtt InitialTriggerScanLambda.Arn
+      StepFunctionArn: !Ref InitialScanWorkflowStateMachine
 
 Outputs:
-  StepFunctionName:
-    Value: !Ref EC2InstanceStepFunction
-    Description: Nombre de la Step Function
+  TriggeredStepFunctionArn:
+    Value: !Ref TriggeredInstanceWorkflowStateMachine
+    Description: Step Function for new instances via EventBridge
+  
+  InitialScanStepFunctionArn:
+    Value: !Ref InitialScanWorkflowStateMachine
+    Description: Step Function for initial scan of ECS/EKS instances
+  
+  InitialScanLambdaArn:
+    Value: !GetAtt InitialScanInstancesLambda.Arn
+    Description: Lambda that scans ECS/EKS instances on deployment
+  
+  InstallAgentLambdaArn:
+    Value: !GetAtt TrendmicroAgentServiceInstallAgentLambda.Arn
+    Description: Lambda that installs Trend Micro agent (shared)
+
