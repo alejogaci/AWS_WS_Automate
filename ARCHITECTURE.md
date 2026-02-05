@@ -34,11 +34,11 @@ graph LR
     C --> D[4️⃣ Install Agent<br/>5 at a time]
     D --> E[✅ Done!]
 
-    style A fill:#e3f2fd
-    style B fill:#e1f5fe
-    style C fill:#b3e5fc
-    style D fill:#81d4fa
-    style E fill:#4fc3f7
+    style A fill:#1976d2,stroke:#0d47a1,color:#fff
+    style B fill:#1e88e5,stroke:#1565c0,color:#fff
+    style C fill:#42a5f5,stroke:#1976d2,color:#fff
+    style D fill:#64b5f6,stroke:#1e88e5,color:#000
+    style E fill:#81c784,stroke:#388e3c,color:#fff
 ```
 
 ### **Scenario 2: New Instance Created** ⚡
@@ -51,12 +51,12 @@ graph LR
     D --> E[5️⃣ Install<br/>Agent]
     E --> F[✅ Done!]
 
-    style A fill:#fff3e0
-    style B fill:#ffe0b2
-    style C fill:#ffcc80
-    style D fill:#ffb74d
-    style E fill:#ffa726
-    style F fill:#ff9800
+    style A fill:#e65100,stroke:#bf360c,color:#fff
+    style B fill:#f57c00,stroke:#e65100,color:#fff
+    style C fill:#fb8c00,stroke:#f57c00,color:#fff
+    style D fill:#ffa726,stroke:#fb8c00,color:#000
+    style E fill:#ffb74d,stroke:#ffa726,color:#000
+    style F fill:#81c784,stroke:#388e3c,color:#fff
 ```
 
 ## 🔄 Detailed Flow - Initial Scan
