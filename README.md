@@ -30,7 +30,7 @@
 - ✅ Scans **all** existing EC2 instances in the account
 - ✅ Filters by customizable tags
 - ✅ Automatically identifies **ECS** and **EKS** clusters
-- ✅ Installs agent in **parallel** (max  concurrent)
+- ✅ Installs agent in **parallel** (max 5 concurrent)
 - ✅ Automatic execution when deploying CloudFormation
 
 #### 2️⃣ **Triggered Mode** - New instances
@@ -45,7 +45,7 @@
 |---------|-------------|
 | **Intelligent Detection** | Automatically identifies ECS (`aws:ecs:clusterName`) and EKS (`kubernetes.io/cluster/*`) instances |
 | **Tag Filtering** | Support for multiple tags: `key1:value1;key2:value2` or `NONE` for no filter |
-| **Concurrency Control** | Maximum 20 instances processed in parallel |
+| **Concurrency Control** | Maximum 5 instances processed in parallel |
 | **Automatic Retries** | Configurable retries with exponential backoff |
 | **Detailed Logs** | CloudWatch Logs with complete information for each step |
 | **Multi-Platform** | Support for Linux (`.sh`) and Windows (`.ps1`) |
@@ -153,7 +153,7 @@ aws s3 cp install-agent.ps1 s3://my-trend-micro-scripts/
    - **Tag**: `Project:IT-MODERNIZATION` or `NONE`
 4. Click **Create Stack**
 
-#### Option B: AWS CLI
+#### Option B: AWS CLI (ECS/EKS Only)
 
 ```bash
 aws cloudformation create-stack \
@@ -162,10 +162,11 @@ aws cloudformation create-stack \
   --parameters \
     ParameterKey=S3Bucket,ParameterValue=my-trend-micro-scripts \
     ParameterKey=Tag,ParameterValue="Project:IT-MODERNIZATION" \
+    ParameterKey=InstanceScope,ParameterValue=ECS_EKS_ONLY \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-#### Option C: With multiple tags
+#### Option C: All Instances
 
 ```bash
 aws cloudformation create-stack \
@@ -173,7 +174,21 @@ aws cloudformation create-stack \
   --template-body file://cloudformation-template.yaml \
   --parameters \
     ParameterKey=S3Bucket,ParameterValue=my-trend-micro-scripts \
-    ParameterKey=Tag,ParameterValue="Environment:Production;Team:DevOps;Project:Security" \
+    ParameterKey=Tag,ParameterValue=NONE \
+    ParameterKey=InstanceScope,ParameterValue=ALL_INSTANCES \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
+#### Option D: All Instances with Tag Filter
+
+```bash
+aws cloudformation create-stack \
+  --stack-name trendmicro-agent-service \
+  --template-body file://cloudformation-template.yaml \
+  --parameters \
+    ParameterKey=S3Bucket,ParameterValue=my-trend-micro-scripts \
+    ParameterKey=Tag,ParameterValue="Environment:Production;Team:DevOps" \
+    ParameterKey=InstanceScope,ParameterValue=ALL_INSTANCES \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
@@ -187,6 +202,23 @@ aws cloudformation create-stack \
 |-----------|-------------|---------|----------|
 | `S3Bucket` | S3 bucket name with scripts | `my-trend-micro-scripts` | ✅ |
 | `Tag` | Tag filter for instances | `Project:IT-MODERNIZATION` or `NONE` | ✅ |
+| `InstanceScope` | Scope of instances to process | `ECS_EKS_ONLY` or `ALL_INSTANCES` | ✅ |
+
+### Instance Scope Options
+
+#### ECS_EKS_ONLY (Default)
+```yaml
+InstanceScope: "ECS_EKS_ONLY"
+```
+- Only processes instances that belong to ECS or EKS clusters
+- Identifies instances by tags: `aws:ecs:clusterName` or `kubernetes.io/cluster/*`
+
+#### ALL_INSTANCES
+```yaml
+InstanceScope: "ALL_INSTANCES"
+```
+- Processes **all** EC2 instances (regardless of ECS/EKS membership)
+- Still respects tag filtering if configured
 
 ### Tag Format
 
@@ -211,6 +243,7 @@ The stack automatically creates these parameters:
 
 - `/trend_micro/aws/automate/s3` → S3 bucket name
 - `/trend_micro/aws/automate/ec2/tag` → Tag filter
+- `/trend_micro/aws/automate/instance/scope` → Instance scope (ECS_EKS_ONLY or ALL_INSTANCES)
 
 ---
 
@@ -463,7 +496,7 @@ Contributions are welcome! 🎉
 
 ## 👥 Authors
 
-- **Alejandro Garcia** - *Initial Work* - [@your-user](https://github.com/alejogaci)
+- **Your Name** - *Initial Work* - [@alejogaci](https://github.com/alejogaci)
 
 ---
 
@@ -473,3 +506,20 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) for deta
 
 ---
 
+## 🙏 Acknowledgments
+
+- AWS for Step Functions and EventBridge
+- Trend Micro for security agent
+- CloudFormation community
+
+---
+
+
+
+<div align="center">
+
+**⭐ If this project helped you, consider giving it a star ⭐**
+
+Made with ❤️ using AWS
+
+</div>
