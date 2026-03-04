@@ -151,6 +151,7 @@ resource "google_cloud_scheduler_job" "scan_trigger" {
   schedule         = "0 2 * * *"
   time_zone        = "UTC"
   attempt_deadline = "320s"
+  region           = var.region
 
   http_target {
     http_method = "POST"
@@ -219,4 +220,5 @@ output "service_account_email" {
   value       = google_service_account.function_sa.email
   description = "Service account email for functions"
 }
+
 
