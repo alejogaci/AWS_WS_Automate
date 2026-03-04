@@ -723,7 +723,7 @@ Resources:
               "ProcessInstances": {
                 "Type": "Map",
                 "ItemsPath": "$.scanResult.instancesToProcess",
-                "MaxConcurrency": 5,
+                "MaxConcurrency": 20,
                 "Iterator": {
                   "StartAt": "CheckSSMRegistration",
                   "States": {
