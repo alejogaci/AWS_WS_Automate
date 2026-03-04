@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 }
 
@@ -34,16 +38,30 @@ locals {
   service_name = "trendmicro-agent-service"
 }
 
+# Automatically package scan function
+data "archive_file" "scan_function_source" {
+  type        = "zip"
+  source_dir  = "${path.module}/functions/scan-instances"
+  output_path = "${path.module}/functions/scan-instances.zip"
+}
+
+# Automatically package install function
+data "archive_file" "install_function_source" {
+  type        = "zip"
+  source_dir  = "${path.module}/functions/install-agent"
+  output_path = "${path.module}/functions/install-agent.zip"
+}
+
 resource "google_storage_bucket_object" "scan_function_source" {
-  name   = "scan-instances-function.zip"
+  name   = "scan-instances-function-${data.archive_file.scan_function_source.output_md5}.zip"
   bucket = var.storage_bucket
-  source = "./functions/scan-instances.zip"
+  source = data.archive_file.scan_function_source.output_path
 }
 
 resource "google_storage_bucket_object" "install_function_source" {
-  name   = "install-agent-function.zip"
+  name   = "install-agent-function-${data.archive_file.install_function_source.output_md5}.zip"
   bucket = var.storage_bucket
-  source = "./functions/install-agent.zip"
+  source = data.archive_file.install_function_source.output_path
 }
 
 resource "google_cloudfunctions2_function" "scan_instances" {
