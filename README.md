@@ -83,7 +83,7 @@
 │                          ▼                                       │
 │                 ┌─────────────────┐                             │
 │                 │  EC2 Instances  │                             │
-│                 │   (ECS / EKS)   │                             │
+│                 │                 │                             │
 │                 └─────────────────┘                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -117,10 +117,7 @@
    ```
 
 2. **SSM Agent** installed on EC2 instances
-
-3. **Tags on instances** (optional):
-   - ECS: `aws:ecs:clusterName`
-   - EKS: `kubernetes.io/cluster/<name>` or `eks:cluster-name`
+   - Policy `AmazonSSMManagedInstanceCore` attached t EC2 instance
 
 ---
 
@@ -305,60 +302,10 @@ Each Lambda generates detailed logs:
 | `/aws/lambda/TRENDMICRO-AGENT-SERVICE-TRIGGERED-WAIT-SSM` | SSM registration wait (with retries) |
 | `/aws/lambda/TRENDMICRO-AGENT-SERVICE-INSTALL-AGENT` | Installation process, Command ID |
 
-### Log Examples
 
-#### Successful Scan
-```
-[START] Starting EC2 instance scan
-✓ ECS - Instance: i-0abc123, Cluster: prod-ecs
-✓ EKS - Instance: i-0def456, Cluster: k8s-prod
-[SUMMARY] Total: 15, ECS: 8, EKS: 7
-```
-
-#### Successful Installation
-```
-[START] Processing installation for instance: i-0abc123
-[S3] Bucket: my-trend-micro-scripts
-[EC2] Platform: linux
-[S3] Script: install-agent.sh
-[SSM] Command sent
-[SSM] Command ID: a1b2c3d4-e5f6-7890
-[COMPLETED] Installation initiated
-```
-
-### Step Functions Console
-
-Visualize flow in real-time:
-
-1. AWS Console → **Step Functions**
-2. Select:
-   - `TRENDMICRO-AGENT-SERVICE-INITIAL-SCAN-WORKFLOW`
-   - `TRENDMICRO-AGENT-SERVICE-TRIGGERED-INSTANCE-WORKFLOW`
-3. View executions and states
-
----
 
 ## 🔧 Troubleshooting
 
-### ❌ Problem: Instance not processed in Initial Scan
-
-**Symptoms:**
-- Instance doesn't appear in scan logs
-
-**Solution:**
-1. Verify instance tags:
-   ```bash
-   aws ec2 describe-instances --instance-ids i-xxxxx --query 'Reservations[0].Instances[0].Tags'
-   ```
-
-2. Verify tag filter in SSM:
-   ```bash
-   aws ssm get-parameter --name /trend_micro/aws/automate/ec2/tag
-   ```
-
-3. Ensure it has ECS or EKS tag:
-   - ECS: `aws:ecs:clusterName`
-   - EKS: `kubernetes.io/cluster/<name>`
 
 ### ❌ Problem: "Instance not registered in SSM"
 
@@ -382,103 +329,6 @@ Visualize flow in real-time:
 
 3. Verify instance IAM role has `AmazonSSMManagedInstanceCore`
 
-### ❌ Problem: Script not downloading from S3
-
-**Symptoms:**
-- Error: `Script .sh not found` or `No files in S3`
-
-**Solution:**
-1. Verify bucket and scripts:
-   ```bash
-   aws s3 ls s3://my-trend-micro-scripts/
-   ```
-
-2. Verify bucket permissions (must allow `s3:GetObject` to Lambda Role)
-
-3. Ensure correct format:
-   - Linux: `install-agent.sh`
-   - Windows: `install-agent.ps1`
-
-### ❌ Problem: EventBridge not triggering for new instances
-
-**Solution:**
-1. Verify rule is enabled:
-   ```bash
-   aws events describe-rule --name TRENDMICRO-AGENT-SERVICE-TRIGGERED-EC2-RUNNING-RULE
-   ```
-
-2. Check CloudWatch metrics for the rule:
-   ```bash
-   aws cloudwatch get-metric-statistics \
-     --namespace AWS/Events \
-     --metric-name TriggeredRules \
-     --dimensions Name=RuleName,Value=TRENDMICRO-AGENT-SERVICE-TRIGGERED-EC2-RUNNING-RULE \
-     --start-time 2024-01-01T00:00:00Z \
-     --end-time 2024-01-31T23:59:59Z \
-     --period 3600 \
-     --statistics Sum
-   ```
-
----
-
-## 🧪 Testing
-
-### Test Manual - Initial Scan
-
-```bash
-# 1. Deploy stack
-aws cloudformation create-stack \
-  --stack-name test-trendmicro \
-  --template-body file://cloudformation-template.yaml \
-  --parameters \
-    ParameterKey=S3Bucket,ParameterValue=test-bucket \
-    ParameterKey=Tag,ParameterValue=NONE \
-  --capabilities CAPABILITY_NAMED_IAM
-
-# 2. Wait for completion
-aws cloudformation wait stack-create-complete --stack-name test-trendmicro
-
-# 3. Verify logs
-aws logs tail /aws/lambda/TRENDMICRO-AGENT-SERVICE-INITIAL-SCAN-INSTANCES --follow
-```
-
-### Test Manual - Triggered Mode
-
-```bash
-# Create test EC2 instance with tags
-aws ec2 run-instances \
-  --image-id ami-xxxxx \
-  --instance-type t3.micro \
-  --iam-instance-profile Name=SSM-Role \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Environment,Value=Test},{Key=aws:ecs:clusterName,Value=test-cluster}]'
-
-# Monitor Step Function
-aws stepfunctions list-executions \
-  --state-machine-arn arn:aws:states:REGION:ACCOUNT:stateMachine:TRENDMICRO-AGENT-SERVICE-TRIGGERED-INSTANCE-WORKFLOW \
-  --max-results 1
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! 🎉
-
-### Process
-
-1. Fork the repository
-2. Create a branch: `git checkout -b feature/my-improvement`
-3. Commit changes: `git commit -m 'Add: new feature'`
-4. Push: `git push origin feature/my-improvement`
-5. Open a Pull Request
-
-### Guidelines
-
-- ✅ Follow naming convention: `TRENDMICRO-AGENT-SERVICE-*`
-- ✅ Add detailed logs in new lambdas
-- ✅ Document changes in `ARCHITECTURE.md`
-- ✅ Include manual tests
-- ✅ Update this README if necessary
 
 ---
 
