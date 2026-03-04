@@ -35,7 +35,7 @@ variable "tag_filter" {
 }
 
 locals {
-  service_name = "trendmicro-agent-service"
+  service_name = "trendmicro-agent-svc"
 }
 
 # Automatically package scan function
@@ -219,3 +219,4 @@ output "service_account_email" {
   value       = google_service_account.function_sa.email
   description = "Service account email for functions"
 }
+
