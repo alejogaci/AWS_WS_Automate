@@ -111,7 +111,7 @@
 
 ```bash
 git clone https://github.com/your-user/trendmicro-agent-service.git
-cd trendmicro-agent-service/gcp-terraform
+cd WS_Automate/GCP
 ```
 
 ### Step 2: Prepare installation scripts
