@@ -10,6 +10,15 @@ Parameters:
     Type: String
     Description: EC2 instance tag filter (use 'NONE' for no filtering, or 'key:value' format)
 
+  InstanceScope:
+    Type: String
+    Description: Scope of instances to process
+    Default: ECS_EKS_ONLY
+    AllowedValues:
+      - ECS_EKS_ONLY
+      - ALL_INSTANCES
+    ConstraintDescription: Must be either ECS_EKS_ONLY or ALL_INSTANCES
+
 Resources:
   SSMParameterS3Bucket:
     Type: AWS::SSM::Parameter
@@ -24,6 +33,13 @@ Resources:
       Name: /trend_micro/aws/automate/ec2/tag
       Type: String
       Value: !Ref Tag
+
+  SSMParameterInstanceScope:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /trend_micro/aws/automate/instance/scope
+      Type: String
+      Value: !Ref InstanceScope
 
   TrendmicroAgentServiceLambdaRole:
     Type: AWS::IAM::Role
@@ -66,6 +82,7 @@ Resources:
                 Resource: 
                    - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trend_micro/aws/automate/s3"
                    - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trend_micro/aws/automate/ec2/tag"
+                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trend_micro/aws/automate/instance/scope"
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
@@ -117,9 +134,13 @@ Resources:
 
               instance_id = event['detail']['instance-id']
 
-              response = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
-              tag_string = response['Parameter']['Value']
+              response_tag = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
+              tag_string = response_tag['Parameter']['Value']
 
+              response_scope = ssm.get_parameter(Name='/trend_micro/aws/automate/instance/scope')
+              instance_scope = response_scope['Parameter']['Value']
+
+              print(f"Instance scope: {instance_scope}")
               print(f"Validating tags for instance {instance_id}: {tag_string}")
 
               ec2instance = ec2.Instance(instance_id)
@@ -142,26 +163,29 @@ Resources:
 
                   print(f"All required tags validated for instance {instance_id}")
 
-              is_ecs = 'aws:ecs:clusterName' in instance_tags
-              is_eks = any(k.startswith('kubernetes.io/cluster/') or k == 'eks:cluster-name' for k in instance_tags)
+              if instance_scope == 'ECS_EKS_ONLY':
+                  is_ecs = 'aws:ecs:clusterName' in instance_tags
+                  is_eks = any(k.startswith('kubernetes.io/cluster/') or k == 'eks:cluster-name' for k in instance_tags)
 
-              if not is_ecs and not is_eks:
-                  cluster_info = "None"
-                  print(f"Instance {instance_id} does not belong to ECS or EKS cluster - SKIPPED")
-                  raise Exception(f"Instance {instance_id} is not part of ECS/EKS cluster")
+                  if not is_ecs and not is_eks:
+                      print(f"Instance {instance_id} does not belong to ECS or EKS cluster - SKIPPED")
+                      raise Exception(f"Instance {instance_id} is not part of ECS/EKS cluster")
 
-              if is_ecs:
-                  cluster_info = f"ECS: {instance_tags['aws:ecs:clusterName']}"
-              elif is_eks:
-                  for key in instance_tags:
-                      if key.startswith('kubernetes.io/cluster/'):
-                          cluster_info = f"EKS: {key.replace('kubernetes.io/cluster/', '')}"
-                          break
-                      elif key == 'eks:cluster-name':
-                          cluster_info = f"EKS: {instance_tags[key]}"
-                          break
+                  if is_ecs:
+                      cluster_info = f"ECS: {instance_tags['aws:ecs:clusterName']}"
+                  elif is_eks:
+                      for key in instance_tags:
+                          if key.startswith('kubernetes.io/cluster/'):
+                              cluster_info = f"EKS: {key.replace('kubernetes.io/cluster/', '')}"
+                              break
+                          elif key == 'eks:cluster-name':
+                              cluster_info = f"EKS: {instance_tags[key]}"
+                              break
 
-              print(f"Instance {instance_id} validated - Cluster: {cluster_info}")
+                  print(f"Instance {instance_id} validated - Cluster: {cluster_info}")
+              else:
+                  print(f"Instance {instance_id} validated - Scope: ALL_INSTANCES")
+
               return {'InstanceId': instance_id}
 
       MemorySize: 300     
@@ -430,8 +454,13 @@ Resources:
           def handler(event, context):
               print("=== Starting EC2 instance scan ===")
               
-              response = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
-              tag_filter = response['Parameter']['Value']
+              response_tag = ssm.get_parameter(Name='/trend_micro/aws/automate/ec2/tag')
+              tag_filter = response_tag['Parameter']['Value']
+              
+              response_scope = ssm.get_parameter(Name='/trend_micro/aws/automate/instance/scope')
+              instance_scope = response_scope['Parameter']['Value']
+              
+              print(f"Instance scope: {instance_scope}")
               print(f"Tag filter parameter: {tag_filter}")
               
               required_tags = {}
@@ -457,6 +486,7 @@ Resources:
               
               ecs_instances = []
               eks_instances = []
+              all_instances = []
               total_scanned = 0
               
               for reservation in response['Reservations']:
@@ -471,50 +501,67 @@ Resources:
                               print(f"Instance {instance_id} does not meet required tags - SKIPPED")
                               continue
                       
-                      if 'aws:ecs:clusterName' in tags:
-                          cluster_name = tags['aws:ecs:clusterName']
-                          ecs_instances.append({
+                      if instance_scope == 'ECS_EKS_ONLY':
+                          if 'aws:ecs:clusterName' in tags:
+                              cluster_name = tags['aws:ecs:clusterName']
+                              ecs_instances.append({
+                                  'InstanceId': instance_id,
+                                  'ClusterName': cluster_name,
+                                  'ClusterType': 'ECS'
+                              })
+                              print(f"✓ ECS - Instance: {instance_id}, Cluster: {cluster_name}")
+                              continue
+                          
+                          eks_cluster = None
+                          for key in tags:
+                              if key.startswith('kubernetes.io/cluster/'):
+                                  eks_cluster = key.replace('kubernetes.io/cluster/', '')
+                                  break
+                              elif key == 'eks:cluster-name':
+                                  eks_cluster = tags[key]
+                                  break
+                          
+                          if eks_cluster:
+                              eks_instances.append({
+                                  'InstanceId': instance_id,
+                                  'ClusterName': eks_cluster,
+                                  'ClusterType': 'EKS'
+                              })
+                              print(f"✓ EKS - Instance: {instance_id}, Cluster: {eks_cluster}")
+                      else:
+                          all_instances.append({
                               'InstanceId': instance_id,
-                              'ClusterName': cluster_name,
-                              'ClusterType': 'ECS'
+                              'ClusterName': 'N/A',
+                              'ClusterType': 'ALL'
                           })
-                          print(f"✓ ECS - Instance: {instance_id}, Cluster: {cluster_name}")
-                          continue
-                      
-                      eks_cluster = None
-                      for key in tags:
-                          if key.startswith('kubernetes.io/cluster/'):
-                              eks_cluster = key.replace('kubernetes.io/cluster/', '')
-                              break
-                          elif key == 'eks:cluster-name':
-                              eks_cluster = tags[key]
-                              break
-                      
-                      if eks_cluster:
-                          eks_instances.append({
-                              'InstanceId': instance_id,
-                              'ClusterName': eks_cluster,
-                              'ClusterType': 'EKS'
-                          })
-                          print(f"✓ EKS - Instance: {instance_id}, Cluster: {eks_cluster}")
+                          print(f"✓ Instance: {instance_id}")
               
               print(f"\n=== SCAN SUMMARY ===")
+              print(f"Instance scope: {instance_scope}")
               print(f"Total instances scanned: {total_scanned}")
-              print(f"ECS instances found: {len(ecs_instances)}")
-              print(f"EKS instances found: {len(eks_instances)}")
-              print(f"\nECS Instances: {json.dumps(ecs_instances, indent=2)}")
-              print(f"\nEKS Instances: {json.dumps(eks_instances, indent=2)}")
               
-              all_instances = ecs_instances + eks_instances
+              if instance_scope == 'ECS_EKS_ONLY':
+                  print(f"ECS instances found: {len(ecs_instances)}")
+                  print(f"EKS instances found: {len(eks_instances)}")
+                  print(f"\nECS Instances: {json.dumps(ecs_instances, indent=2)}")
+                  print(f"\nEKS Instances: {json.dumps(eks_instances, indent=2)}")
+                  instances_to_process = ecs_instances + eks_instances
+              else:
+                  print(f"All instances found: {len(all_instances)}")
+                  print(f"\nAll Instances: {json.dumps(all_instances, indent=2)}")
+                  instances_to_process = all_instances
               
               return {
                   'statusCode': 200,
                   'totalScanned': total_scanned,
-                  'ecsInstances': ecs_instances,
-                  'eksInstances': eks_instances,
-                  'ecsCount': len(ecs_instances),
-                  'eksCount': len(eks_instances),
-                  'instancesToProcess': all_instances
+                  'instanceScope': instance_scope,
+                  'ecsInstances': ecs_instances if instance_scope == 'ECS_EKS_ONLY' else [],
+                  'eksInstances': eks_instances if instance_scope == 'ECS_EKS_ONLY' else [],
+                  'allInstances': all_instances if instance_scope == 'ALL_INSTANCES' else [],
+                  'ecsCount': len(ecs_instances) if instance_scope == 'ECS_EKS_ONLY' else 0,
+                  'eksCount': len(eks_instances) if instance_scope == 'ECS_EKS_ONLY' else 0,
+                  'allCount': len(all_instances) if instance_scope == 'ALL_INSTANCES' else 0,
+                  'instancesToProcess': instances_to_process
               }
       MemorySize: 512     
       Timeout: 300
@@ -621,7 +668,7 @@ Resources:
       DefinitionString:
         !Sub |
           {
-            "Comment": "Initial scan of ECS/EKS instances with agent installation",
+            "Comment": "Initial scan of instances with agent installation",
             "StartAt": "ScanInstances",
             "States": {
               "ScanInstances": {
@@ -634,12 +681,39 @@ Resources:
                 "Type": "Choice",
                 "Choices": [
                   {
+                    "Variable": "$.scanResult.instanceScope",
+                    "StringEquals": "ECS_EKS_ONLY",
+                    "Next": "CheckECSEKSInstances"
+                  },
+                  {
+                    "Variable": "$.scanResult.instanceScope",
+                    "StringEquals": "ALL_INSTANCES",
+                    "Next": "CheckAllInstances"
+                  }
+                ],
+                "Default": "NoInstancesFound"
+              },
+              "CheckECSEKSInstances": {
+                "Type": "Choice",
+                "Choices": [
+                  {
                     "Variable": "$.scanResult.ecsCount",
                     "NumericGreaterThan": 0,
                     "Next": "ProcessInstances"
                   },
                   {
                     "Variable": "$.scanResult.eksCount",
+                    "NumericGreaterThan": 0,
+                    "Next": "ProcessInstances"
+                  }
+                ],
+                "Default": "NoInstancesFound"
+              },
+              "CheckAllInstances": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.scanResult.allCount",
                     "NumericGreaterThan": 0,
                     "Next": "ProcessInstances"
                   }
@@ -710,7 +784,7 @@ Resources:
               },
               "NoInstancesFound": {
                 "Type": "Pass",
-                "Result": "No ECS/EKS instances found to process",
+                "Result": "No instances found to process",
                 "End": true
               }
             }
@@ -783,11 +857,11 @@ Outputs:
   
   InitialScanStepFunctionArn:
     Value: !Ref InitialScanWorkflowStateMachine
-    Description: Step Function for initial scan of ECS/EKS instances
+    Description: Step Function for initial scan of instances
   
   InitialScanLambdaArn:
     Value: !GetAtt InitialScanInstancesLambda.Arn
-    Description: Lambda that scans ECS/EKS instances on deployment
+    Description: Lambda that scans instances on deployment
   
   InstallAgentLambdaArn:
     Value: !GetAtt TrendmicroAgentServiceInstallAgentLambda.Arn
