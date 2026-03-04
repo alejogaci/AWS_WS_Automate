@@ -123,17 +123,8 @@ gsutil cp install-agent.sh gs://my-trend-micro-scripts/
 gsutil cp install-agent.ps1 gs://my-trend-micro-scripts/
 ```
 
-### Step 3: Prepare function code
 
-```bash
-cd functions/scan-instances
-zip -r ../scan-instances.zip .
-cd ../install-agent
-zip -r ../install-agent.zip .
-cd ../..
-```
-
-### Step 4: Configure Terraform
+### Step 3: Configure Terraform
 
 Create `terraform.tfvars` in the same directory as `gcp-main.tf`:
 
@@ -144,7 +135,7 @@ storage_bucket = "my-trend-micro-scripts"
 tag_filter     = "NONE"
 ```
 
-### Step 5: Deploy with Terraform
+### Step 4: Deploy with Terraform
 
 ```bash
 terraform init
