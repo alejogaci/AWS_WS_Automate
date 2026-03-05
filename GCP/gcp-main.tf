@@ -183,7 +183,10 @@ resource "google_eventarc_trigger" "instance_created" {
   }
 
   destination {
-    cloud_function = google_cloudfunctions2_function.install_agent.id
+    cloud_run_service {
+      service = google_cloudfunctions2_function.install_agent.name
+      region  = var.region
+    }
   }
 
   service_account = google_service_account.eventarc_sa.email
