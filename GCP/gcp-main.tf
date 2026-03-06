@@ -5,9 +5,21 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 5.0"
+    }
     archive = {
       source  = "hashicorp/archive"
       version = "~> 2.4"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
     }
   }
 }
@@ -133,6 +145,12 @@ resource "google_project_iam_member" "function_compute_viewer" {
   member  = "serviceAccount:${google_service_account.function_sa.email}"
 }
 
+resource "google_project_iam_member" "function_compute_instance_admin" {
+  project = var.project_id
+  role    = "roles/compute.instanceAdmin.v1"
+  member  = "serviceAccount:${google_service_account.function_sa.email}"
+}
+
 resource "google_project_iam_member" "function_compute_osadmin" {
   project = var.project_id
   role    = "roles/compute.osAdminLogin"
@@ -224,5 +242,33 @@ output "service_account_email" {
   description = "Service account email for functions"
 }
 
+# Wait for functions to be ready
+resource "time_sleep" "wait_for_functions" {
+  depends_on = [
+    google_cloudfunctions2_function.scan_instances,
+    google_cloudfunctions2_function.install_agent,
+    google_cloud_scheduler_job.scan_trigger
+  ]
 
+  create_duration = "60s"
+}
 
+# Trigger initial scan using Cloud Scheduler API
+resource "null_resource" "trigger_initial_scan" {
+  depends_on = [time_sleep.wait_for_functions]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      curl -X POST \
+        "https://cloudscheduler.googleapis.com/v1/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_scheduler_job.scan_trigger.name}:run" \
+        -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+        -H "Content-Type: application/json" \
+        && echo "✅ Initial scan triggered successfully!" \
+        || echo "⚠️ Could not trigger automatically. Run manually: gcloud scheduler jobs run ${google_cloud_scheduler_job.scan_trigger.name} --location=${var.region}"
+    EOT
+  }
+
+  triggers = {
+    scheduler_job_id = google_cloud_scheduler_job.scan_trigger.id
+  }
+}
