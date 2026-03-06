@@ -124,18 +124,42 @@ def _install_agent(compute_client, storage_client, project_id, bucket_name, inst
                     is_windows = True
                     break
     
-    # Select script
-    script_name = 'install-agent.ps1' if is_windows else 'install-agent.sh'
-    print(f"[PLATFORM] Instance {instance_name}: {'Windows' if is_windows else 'Linux'}")
-    print(f"[SCRIPT] Using: {script_name}")
+    # Find script in bucket
+    bucket = storage_client.bucket(bucket_name)
+    
+    if is_windows:
+        # Find any .ps1 file
+        blobs = bucket.list_blobs()
+        script_name = None
+        for blob in blobs:
+            if blob.name.endswith('.ps1'):
+                script_name = blob.name
+                break
+        
+        if not script_name:
+            raise Exception(f"No PowerShell script (.ps1) found in bucket {bucket_name}")
+        
+        print(f"[PLATFORM] Instance {instance_name}: Windows")
+        print(f"[SCRIPT] Found: {script_name}")
+        metadata_key = 'windows-startup-script-ps1'
+    else:
+        # Find any .sh file
+        blobs = bucket.list_blobs()
+        script_name = None
+        for blob in blobs:
+            if blob.name.endswith('.sh'):
+                script_name = blob.name
+                break
+        
+        if not script_name:
+            raise Exception(f"No shell script (.sh) found in bucket {bucket_name}")
+        
+        print(f"[PLATFORM] Instance {instance_name}: Linux")
+        print(f"[SCRIPT] Found: {script_name}")
+        metadata_key = 'startup-script'
     
     # Download script from GCS
-    bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(script_name)
-    
-    if not blob.exists():
-        raise Exception(f"Script {script_name} not found in bucket {bucket_name}")
-    
     script_content = blob.download_as_text()
     print(f"[DOWNLOAD] Script downloaded: {len(script_content)} bytes")
     
@@ -148,10 +172,7 @@ def _install_agent(compute_client, storage_client, project_id, bucket_name, inst
                      if item.key not in ['startup-script', 'windows-startup-script-ps1']]
     
     # Add new startup script
-    if is_windows:
-        metadata_items.append(compute_v1.Items(key='windows-startup-script-ps1', value=script_content))
-    else:
-        metadata_items.append(compute_v1.Items(key='startup-script', value=script_content))
+    metadata_items.append(compute_v1.Items(key=metadata_key, value=script_content))
     
     # Update metadata
     metadata = compute_v1.Metadata(
