@@ -40,22 +40,43 @@ def install_agent(cloud_event):
         
         is_windows = any('windows' in disk.licenses[0].lower() for disk in instance.disks if disk.licenses)
         
+        # Find script in bucket
+        bucket = storage_client.bucket(storage_bucket)
+        
         if is_windows:
-            script_name = 'install-agent.ps1'
+            # Find any .ps1 file
+            blobs = bucket.list_blobs()
+            script_name = None
+            for blob in blobs:
+                if blob.name.endswith('.ps1'):
+                    script_name = blob.name
+                    break
+            
+            if not script_name:
+                print(f"[ERROR] No PowerShell script (.ps1) found in bucket {storage_bucket}")
+                return
+            
             metadata_key = 'windows-startup-script-ps1'
             print("[PLATFORM] Detected: Windows")
+            print(f"[SCRIPT] Found: {script_name}")
         else:
-            script_name = 'install-agent.sh'
+            # Find any .sh file
+            blobs = bucket.list_blobs()
+            script_name = None
+            for blob in blobs:
+                if blob.name.endswith('.sh'):
+                    script_name = blob.name
+                    break
+            
+            if not script_name:
+                print(f"[ERROR] No shell script (.sh) found in bucket {storage_bucket}")
+                return
+            
             metadata_key = 'startup-script'
             print("[PLATFORM] Detected: Linux")
+            print(f"[SCRIPT] Found: {script_name}")
         
-        bucket = storage_client.bucket(storage_bucket)
         blob = bucket.blob(script_name)
-        
-        if not blob.exists():
-            print(f"[ERROR] Script {script_name} not found in bucket {storage_bucket}")
-            return
-        
         script_content = blob.download_as_text()
         print(f"[SCRIPT] Downloaded: {script_name}")
         print(f"[SCRIPT] Size: {len(script_content)} bytes")
@@ -93,3 +114,4 @@ def install_agent(cloud_event):
     except Exception as e:
         print(f"[ERROR] Failed to install agent: {str(e)}")
         raise
+
