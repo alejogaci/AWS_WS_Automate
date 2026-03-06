@@ -38,14 +38,15 @@ def install_agent(cloud_event):
         print(f"[INSTANCE] Status: {instance.status}")
         print(f"[INSTANCE] Machine type: {instance.machine_type}")
         
-        is_linux = any('linux' in disk.licenses[0].lower() for disk in instance.disks if disk.licenses)
         is_windows = any('windows' in disk.licenses[0].lower() for disk in instance.disks if disk.licenses)
         
         if is_windows:
             script_name = 'install-agent.ps1'
+            metadata_key = 'windows-startup-script-ps1'
             print("[PLATFORM] Detected: Windows")
         else:
             script_name = 'install-agent.sh'
+            metadata_key = 'startup-script'
             print("[PLATFORM] Detected: Linux")
         
         bucket = storage_client.bucket(storage_bucket)
@@ -59,12 +60,21 @@ def install_agent(cloud_event):
         print(f"[SCRIPT] Downloaded: {script_name}")
         print(f"[SCRIPT] Size: {len(script_content)} bytes")
         
-        metadata_items = [
+        # Get current metadata
+        current_metadata = instance.metadata
+        metadata_items = list(current_metadata.items) if current_metadata.items else []
+        
+        # Remove old startup scripts
+        metadata_items = [item for item in metadata_items 
+                         if item.key not in ['startup-script', 'windows-startup-script-ps1']]
+        
+        # Add new startup script
+        metadata_items.append(
             compute_v1.Items(
-                key='startup-script' if is_linux else 'windows-startup-script-ps1',
+                key=metadata_key,
                 value=script_content
             )
-        ]
+        )
         
         request = compute_v1.SetMetadataInstanceRequest(
             project=project_id,
@@ -72,7 +82,7 @@ def install_agent(cloud_event):
             instance=instance_name,
             metadata_resource=compute_v1.Metadata(
                 items=metadata_items,
-                fingerprint=instance.metadata.fingerprint
+                fingerprint=current_metadata.fingerprint
             )
         )
         
