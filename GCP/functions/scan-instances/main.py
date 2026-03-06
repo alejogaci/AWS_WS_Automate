@@ -15,6 +15,7 @@ def scan_instances(request):
     print(f"[CONFIG] Tag filter: {tag_filter}")
     
     compute_client = compute_v1.InstancesClient()
+    storage_client = storage.Client()
     
     required_labels = {}
     if tag_filter != 'NONE':
@@ -69,11 +70,33 @@ def scan_instances(request):
     print(f"\n[SUMMARY] Total scanned: {total_scanned}")
     print(f"[SUMMARY] Instances to process: {len(instances_to_process)}")
     
-    _trigger_installations(project_id, storage_bucket, instances_to_process)
+    # Install agent on each instance
+    installed_count = 0
+    failed_count = 0
+    
+    for instance_info in instances_to_process:
+        try:
+            print(f"\n[INSTALL] Starting installation for {instance_info['name']}")
+            _install_agent(compute_client, storage_client, project_id, storage_bucket, 
+                          instance_info['name'], instance_info['zone'])
+            installed_count += 1
+            print(f"[SUCCESS] Agent installed on {instance_info['name']}")
+        except Exception as e:
+            failed_count += 1
+            print(f"[ERROR] Failed to install on {instance_info['name']}: {str(e)}")
+    
+    print(f"\n[FINAL SUMMARY]")
+    print(f"Total scanned: {total_scanned}")
+    print(f"Instances processed: {len(instances_to_process)}")
+    print(f"Successfully installed: {installed_count}")
+    print(f"Failed: {failed_count}")
     
     return {
+        'status': 'success',
         'totalScanned': total_scanned,
         'instancesToProcess': len(instances_to_process),
+        'installed': installed_count,
+        'failed': failed_count,
         'instances': instances_to_process
     }, 200
 
@@ -82,13 +105,68 @@ def _get_zones(project_id):
     request = compute_v1.ListZonesRequest(project=project_id)
     return zones_client.list(request=request)
 
-def _trigger_installations(project_id, bucket, instances):
-    from google.cloud import pubsub_v1
+def _install_agent(compute_client, storage_client, project_id, bucket_name, instance_name, zone):
+    """Install Trend Micro agent on a specific instance"""
     
-    publisher = pubsub_v1.PublisherClient()
-    topic_path = publisher.topic_path(project_id, 'trendmicro-agent-install')
+    # Get instance details
+    instance = compute_client.get(
+        project=project_id,
+        zone=zone,
+        instance=instance_name
+    )
     
-    for instance in instances:
-        message_data = json.dumps(instance).encode('utf-8')
-        future = publisher.publish(topic_path, message_data)
-        print(f"[PUBSUB] Published message for instance: {instance['name']}")
+    # Detect OS type
+    is_windows = False
+    for disk in instance.disks:
+        if disk.licenses:
+            for license_url in disk.licenses:
+                if 'windows' in license_url.lower():
+                    is_windows = True
+                    break
+    
+    # Select script
+    script_name = 'install-agent.ps1' if is_windows else 'install-agent.sh'
+    print(f"[PLATFORM] Instance {instance_name}: {'Windows' if is_windows else 'Linux'}")
+    print(f"[SCRIPT] Using: {script_name}")
+    
+    # Download script from GCS
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(script_name)
+    
+    if not blob.exists():
+        raise Exception(f"Script {script_name} not found in bucket {bucket_name}")
+    
+    script_content = blob.download_as_text()
+    print(f"[DOWNLOAD] Script downloaded: {len(script_content)} bytes")
+    
+    # Prepare metadata
+    current_metadata = instance.metadata
+    metadata_items = list(current_metadata.items) if current_metadata.items else []
+    
+    # Remove old startup script if exists
+    metadata_items = [item for item in metadata_items 
+                     if item.key not in ['startup-script', 'windows-startup-script-ps1']]
+    
+    # Add new startup script
+    if is_windows:
+        metadata_items.append(compute_v1.Items(key='windows-startup-script-ps1', value=script_content))
+    else:
+        metadata_items.append(compute_v1.Items(key='startup-script', value=script_content))
+    
+    # Update metadata
+    metadata = compute_v1.Metadata(
+        items=metadata_items,
+        fingerprint=current_metadata.fingerprint
+    )
+    
+    request = compute_v1.SetMetadataInstanceRequest(
+        project=project_id,
+        zone=zone,
+        instance=instance_name,
+        metadata_resource=metadata
+    )
+    
+    operation = compute_client.set_metadata(request=request)
+    print(f"[METADATA] Updated for {instance_name}")
+    
+    return True
